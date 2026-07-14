@@ -1,46 +1,29 @@
-import groovy.swing.SwingBuilder;
+import java.security.MessageDigest
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
 
 apply plugin: 'com.android.application'
 
 // based on https://www.timroes.de/2014/01/19/using-password-prompts-with-gradle-build-files/
-def readPassword(String fmt) {
-    def ret = ''
-    if (System.console() == null){
-        new SwingBuilder().edt {
-            dialog(modal: true,
-                    title: 'Enter password',
-                    alwaysOnTop: true,
-                    resizable: false,
-                    locationRelativeTo: null,
-                    pack: true,
-                    show: true
-            ) {
-                vbox {
-                    label(text: fmt)
-                    input = passwordField()
-                    button(defaultButton: true, text: 'OK', actionPerformed: {
-                        ret = new String(input.password);
-                        dispose();
-                    })
-                }
-            }
-        }
-    }else{
-        ret = new String(System.console().readPassword("\n\$ $fmt"));
+def readPassword(fmt) {
+    def cons = System.console()
+    if (cons != null) {
+        return new String(cons.readPassword("\n$fmt"))
     }
-    return ret;
+    // No console available (IDE sync etc.). Return empty to avoid UI and IDE issues.
+    return ""
 }
 
 if (project.hasProperty("batphone.properties")){
     def propFile = file(project.property("batphone.properties"))
     if (propFile.exists()){
         println "Loading additional properties from $propFile"
-        def props = new Properties();
-        props.load(new FileInputStream(propFile))
+        def props = new java.util.Properties()
+        propFile.withInputStream { props.load(it) }
         for(p in props) {
             def value = p.value
             if (value.startsWith("./"))
-                value = new File(propFile.getParent(), value.substring(2)).absolutePath
+                value = file(propFile.getParent() + "/" + value.substring(2)).absolutePath
             println "${p.key} = $value"
             project.ext[p.key] = value
         }
@@ -49,42 +32,236 @@ if (project.hasProperty("batphone.properties")){
     }
 }
 
-android {
-    compileSdkVersion 27
-    ext {
-        appName = "Serval_Mesh"
-        commitCount = "git rev-list --count HEAD".execute().text.toInteger();
-        gitDescribe = "git describe --always --dirty --tags".execute().text.trim();
-        commitSha = "git rev-parse HEAD".execute().text.trim();
-        libSodiumStatus = "git describe --always --dirty --tags".execute(null, file('src/main/jni/libsodium')).text.trim();
-        cleanBuild = !gitDescribe.contains('-dirty')
-        releaseType = "development"
+def loadLooseProperties = { File propertiesFile ->
+    def values = [:]
+    propertiesFile.eachLine('UTF-8') { String rawLine ->
+        if (rawLine == null) {
+            return
+        }
+        def trimmed = rawLine.trim()
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) {
+            return
+        }
+        int separatorIndex = -1
+        for (int i = 0; i < rawLine.length(); i++) {
+            char current = rawLine.charAt(i)
+            if ((current == '=' || current == ':') && (i == 0 || rawLine.charAt(i - 1) != '\\')) {
+                separatorIndex = i
+                break
+            }
+        }
+        def key = separatorIndex >= 0 ? rawLine.substring(0, separatorIndex).trim() : trimmed
+        def value = separatorIndex >= 0 ? rawLine.substring(separatorIndex + 1).trim() : ""
+        if (key) {
+            values[key] = value
+        }
     }
-    if (cleanBuild) {
-        // work out what kind of build this is based on the most recent git tag
-        if (gitDescribe ==~ /[\d.]+/)
-            releaseType = "release"
-        else if (gitDescribe ==~ /[\d.]+.RC\d+/)
-            releaseType = "beta"
-        else
-            releaseType = "alpha"
-    }
-    println "Version $commitCount - $releaseType - $gitDescribe"
+    values
+}
 
+def localReleaseSigningPropsFile = rootProject.file("release-signing.local.properties")
+def localReleaseSigningProps = [:]
+if (localReleaseSigningPropsFile.exists()) {
+    println "Loading local release signing properties from $localReleaseSigningPropsFile"
+    localReleaseSigningProps.putAll(loadLooseProperties(localReleaseSigningPropsFile))
+}
+
+ext {
+    appName = "SATNET"
+
+    // Helper: run a command, return stdout on exit 0, otherwise return the fallback.
+    // This keeps builds working in shallow clones, source snapshots, and restricted CI agents.
+    def safeGitExec = { List<String> cmd, File dir = null, String fallback ->
+        try {
+            def proc = cmd.execute(null, dir)
+            proc.waitForOrKill(5000)
+            proc.exitValue() == 0 ? proc.text.trim() : fallback
+        } catch (Exception ignored) {
+            fallback
+        }
+    }
+
+    commitCount = {
+        def raw = safeGitExec(["git", "rev-list", "--count", "HEAD"], null,
+                System.getenv("BUILD_NUMBER") ?: "0")
+        raw.isInteger() ? raw.toInteger() : 0
+    }()
+    gitDescribe = safeGitExec(
+            ["git", "describe", "--always", "--dirty", "--tags"], null,
+            System.getenv("GIT_DESCRIBE") ?: "0.0.0-unversioned")
+    commitSha = safeGitExec(
+            ["git", "rev-parse", "HEAD"], null,
+            System.getenv("GIT_SHA") ?: "0000000000000000000000000000000000000000")
+    libSodiumStatus = safeGitExec(
+            ["git", "describe", "--always", "--dirty", "--tags"],
+            file('src/main/jni/libsodium'), "unknown")
+    cleanBuild = !gitDescribe.contains('-dirty')
+    releaseType = "development"
+}
+
+def lightningFeatureEnabled = (project.findProperty("feature.lightning.enabled") ?: "false").toBoolean()
+def relayFeatureEnabled = (project.findProperty("feature.relay.enabled") ?: "false").toBoolean()
+def routingFeatureEnabled = (project.findProperty("feature.experimental.routing.enabled") ?: "false").toBoolean()
+def satnetLiveExchangeRatesEnabled = (project.findProperty("satnet.exchange.live.enabled") ?: "true").toBoolean()
+def satnetDeploymentStage = (project.findProperty("satnet.deployment.stage") ?: "pilot").toString()
+def satnetSettlementNetwork = (project.findProperty("satnet.settlement.network") ?: "testnet").toString()
+def satnetRelayDirectoryUrl = (project.findProperty("satnet.relay.directory.url") ?: "https://directory.satnet.invalid").toString()
+def satnetExchangeRateProviderUrls = (project.findProperty("satnet.exchange.providers") ?: "https://api.coinbase.com/v2/exchange-rates?currency=BTC;https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies={CURRENCIES}").toString()
+def satnetExchangeRateBaseUrl = satnetExchangeRateProviderUrls.split(";")[0].trim()
+def satnetComplianceProfile = (project.findProperty("satnet.compliance.profile") ?: "partner-led").toString()
+def satnetRemoteKillSwitchEnabled = (project.findProperty("satnet.remote.kill_switch.enabled") ?: "true").toBoolean()
+def satnetAutoRhizomeApkImportEnabled = (project.findProperty("satnet.auto.rhizome.apk.import.enabled") ?: "false").toBoolean()
+def satnetAllowCustodialMode = (project.findProperty("satnet.allow.custodial.mode") ?: "false").toBoolean()
+def satnetAllowProtocolFees = (project.findProperty("satnet.allow.protocol.fees") ?: "false").toBoolean()
+def satnetAllowSurveillanceMonetization = (project.findProperty("satnet.allow.surveillance.monetization") ?: "false").toBoolean()
+def satnetRequireTestnetByDefault = (project.findProperty("satnet.require.testnet.by.default") ?: "true").toBoolean()
+def satnetMainnetExplicitOverride = (project.findProperty("satnet.mainnet.explicit.override") ?: "false").toBoolean()
+def strictCiLint = (project.findProperty("ci.strict.lint") ?: "false").toBoolean()
+def requestedTaskNames = gradle.startParameter.taskNames.collect { (it ?: "").toLowerCase() }
+def releaseTaskRequested = requestedTaskNames.any {
+    it.contains("release") || it.contains("productiongate") || it.contains("verifyreleasesigningconfig") || it.contains("writereleasechecksums")
+}
+def allowUnsignedRelease = (project.findProperty("allow.unsigned.release") ?: "false").toBoolean()
+def releaseSigningRequired = (project.findProperty("release.signing.required") ?: (releaseTaskRequested && !allowUnsignedRelease).toString()).toBoolean()
+def resolveProjectOrEnvValue = { String propertyName, String envName ->
+    if (project.hasProperty(propertyName)) {
+        return project.property(propertyName).toString()
+    }
+    def envValue = System.getenv(envName)
+    if (envValue != null && envValue.toString().trim()) {
+        return envValue.toString()
+    }
+    (localReleaseSigningProps[propertyName] ?: "").toString()
+}
+def configuredReleaseStorePath = resolveProjectOrEnvValue("release.key.store", "BATPHONE_RELEASE_KEYSTORE")
+def configuredReleaseKeyAlias = resolveProjectOrEnvValue("release.key.alias", "BATPHONE_RELEASE_KEY_ALIAS")
+def configuredReleaseStorePassword = resolveProjectOrEnvValue("release.key.store.password", "BATPHONE_RELEASE_STORE_PASSWORD")
+def configuredReleaseKeyPassword = resolveProjectOrEnvValue("release.key.password", "BATPHONE_RELEASE_KEY_PASSWORD")
+def configuredReleaseStoreFile = configuredReleaseStorePath ? file(configuredReleaseStorePath) : null
+if (configuredReleaseStoreFile && !configuredReleaseStoreFile.exists()) {
+    configuredReleaseStoreFile = null
+}
+def releaseSigningConfigured = configuredReleaseStoreFile != null &&
+        configuredReleaseKeyAlias.trim() &&
+        configuredReleaseStorePassword.trim() &&
+        configuredReleaseKeyPassword.trim()
+def strictReleaseGateRequested = requestedTaskNames.any {
+    it.contains("productiongate") || it.contains("releasereadinessgate")
+}
+def readPositiveIntProperty = { String propertyName, int fallback ->
+    def raw = (project.findProperty(propertyName) ?: "").toString().trim()
+    if (!raw) {
+        return fallback
+    }
+    try {
+        return Math.max(1, Integer.parseInt(raw))
+    } catch (NumberFormatException ignored) {
+        logger.warn("Ignoring invalid ${propertyName} value '${raw}', using ${fallback}")
+        return fallback
+    }
+}
+def readNonNegativeLongProperty = { String propertyName, long fallback ->
+    def raw = (project.findProperty(propertyName) ?: "").toString().trim()
+    if (!raw) {
+        return fallback
+    }
+    try {
+        return Math.max(0L, Long.parseLong(raw))
+    } catch (NumberFormatException ignored) {
+        logger.warn("Ignoring invalid ${propertyName} value '${raw}', using ${fallback}")
+        return fallback
+    }
+}
+def readBooleanProperty = { String propertyName, boolean fallback ->
+    def raw = (project.findProperty(propertyName) ?: "").toString().trim()
+    return raw ? raw.toBoolean() : fallback
+}
+def isWindowsHost = System.getProperty("os.name", "").toLowerCase().contains("windows")
+def configuredTestMaxParallelForks = readPositiveIntProperty("test.maxParallelForks", 1)
+def configuredTestMinHeap = (project.findProperty("test.minHeap") ?: "256m").toString()
+def configuredTestMaxHeap = (project.findProperty("test.maxHeap") ?: "1024m").toString()
+def configuredTestMaxMetaspace = (project.findProperty("test.maxMetaspace") ?: "256m").toString()
+def configuredTestForkEvery = readNonNegativeLongProperty("test.forkEvery", 0L)
+def configuredTestActiveProcessorCount = readPositiveIntProperty("test.activeProcessorCount", 1)
+def configuredTestUseSerialGc = readBooleanProperty("test.useSerialGc", false)
+def configuredTestHeapBaseMinAddress = (project.findProperty("test.heapBaseMinAddress") ?: (isWindowsHost ? "1g" : "")).toString().trim()
+def nativeAbis = ["armeabi-v7a", "arm64-v8a"]
+
+if (satnetAllowCustodialMode) {
+    throw new GradleException("SATNET policy violation: custodial mode must remain disabled")
+}
+if (satnetAllowProtocolFees) {
+    throw new GradleException("SATNET policy violation: mandatory protocol fees are not allowed")
+}
+if (satnetAllowSurveillanceMonetization) {
+    throw new GradleException("SATNET policy violation: surveillance monetization is not allowed")
+}
+if (satnetRequireTestnetByDefault && satnetSettlementNetwork.equalsIgnoreCase("mainnet") && !satnetMainnetExplicitOverride) {
+    throw new GradleException("SATNET safety gate: mainnet settlement requires -Psatnet.mainnet.explicit.override=true")
+}
+if (satnetSettlementNetwork.equalsIgnoreCase("mainnet") && satnetDeploymentStage.equalsIgnoreCase("pilot") && !satnetMainnetExplicitOverride) {
+    throw new GradleException("SATNET safety gate: pilot deployments cannot use mainnet settlement")
+}
+
+if (project.ext.cleanBuild) {
+    // work out what kind of build this is based on the most recent git tag
+    if (project.ext.gitDescribe ==~ /[\d.]+/)
+        project.ext.releaseType = "release"
+    else if (project.ext.gitDescribe ==~ /[\d.]+.RC\d+/)
+        project.ext.releaseType = "beta"
+    else
+        project.ext.releaseType = "alpha"
+}
+println "Version $project.ext.commitCount - $project.ext.releaseType - $project.ext.gitDescribe"
+
+android {
+    namespace = 'org.servalproject'
+    compileSdkVersion 34
+    buildFeatures {
+        buildConfig = true
+        resValues = true
+    }
+    // Moved ndkVersion to top-level android block (AGP 8.x requires this)
+    ndkVersion = "21.4.7075529"
     defaultConfig {
         applicationId "org.servalproject"
-        minSdkVersion 8
-        targetSdkVersion 10
-        versionCode commitCount
-        versionName gitDescribe
-        buildConfigField "String", "CommitSha", ("\"" + commitSha + "\"");
-        resValue "string", "version", gitDescribe
+        minSdkVersion 19
+        targetSdkVersion 34
+        versionCode project.ext.commitCount
+        versionName project.ext.gitDescribe
+        buildConfigField "String", "CommitSha", ("\"" + project.ext.commitSha + "\"")
+        buildConfigField "boolean", "FEATURE_LIGHTNING_ENABLED", lightningFeatureEnabled.toString()
+        buildConfigField "boolean", "FEATURE_RELAY_ENABLED", relayFeatureEnabled.toString()
+        buildConfigField "boolean", "FEATURE_EXPERIMENTAL_ROUTING_ENABLED", routingFeatureEnabled.toString()
+        buildConfigField "boolean", "SATNET_LIVE_EXCHANGE_RATES_ENABLED", satnetLiveExchangeRatesEnabled.toString()
+        buildConfigField "String", "SATNET_DEPLOYMENT_STAGE", "\"$satnetDeploymentStage\""
+        buildConfigField "String", "SATNET_SETTLEMENT_NETWORK", "\"$satnetSettlementNetwork\""
+        buildConfigField "String", "SATNET_RELAY_DIRECTORY_URL", "\"$satnetRelayDirectoryUrl\""
+        buildConfigField "String", "SATNET_EXCHANGE_RATE_BASE_URL", "\"$satnetExchangeRateBaseUrl\""
+        buildConfigField "String", "SATNET_EXCHANGE_RATE_PROVIDER_URLS", "\"$satnetExchangeRateProviderUrls\""
+        buildConfigField "String", "SATNET_COMPLIANCE_PROFILE", "\"$satnetComplianceProfile\""
+        buildConfigField "boolean", "SATNET_REMOTE_KILL_SWITCH_ENABLED", satnetRemoteKillSwitchEnabled.toString()
+        buildConfigField "boolean", "SATNET_AUTO_RHIZOME_APK_IMPORT_ENABLED", satnetAutoRhizomeApkImportEnabled.toString()
+        buildConfigField "boolean", "SATNET_ALLOW_CUSTODIAL_MODE", satnetAllowCustodialMode.toString()
+        buildConfigField "boolean", "SATNET_ALLOW_PROTOCOL_FEES", satnetAllowProtocolFees.toString()
+        buildConfigField "boolean", "SATNET_ALLOW_SURVEILLANCE_MONETIZATION", satnetAllowSurveillanceMonetization.toString()
+        buildConfigField "boolean", "SATNET_REQUIRE_TESTNET_BY_DEFAULT", satnetRequireTestnetByDefault.toString()
+        buildConfigField "boolean", "SATNET_MAINNET_EXPLICIT_OVERRIDE", satnetMainnetExplicitOverride.toString()
+        resValue "string", "version", project.ext.gitDescribe
+        // ndkVersion was here previously; removed to avoid MissingPropertyException when read outside block
         externalNativeBuild {
             ndkBuild {
-                abiFilters = ["armeabi-v7a"]
+                abiFilters = nativeAbis
                 arguments += "-j${Runtime.runtime.availableProcessors()}".toString()
             }
         }
+        multiDexEnabled = true
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 
     externalNativeBuild {
@@ -95,215 +272,458 @@ android {
 
     signingConfigs {
         release {
-            storeFile = project.hasProperty("release.key.store") ?
-                    file(project.property("release.key.store")) : null
-            if (storeFile && !storeFile.exists())
-                storeFile = null;
-            // leave blank to force prompting the user
-            // but not null so that android thinks it is already configured
-            storePassword = ""
-            keyAlias = project.findProperty("release.key.alias")
-            keyPassword = ""
-            v2SigningEnabled = false
+            storeFile = configuredReleaseStoreFile
+            // Prefer explicit CI/developer secrets when available; otherwise prompt later.
+            storePassword = configuredReleaseStorePassword
+            keyAlias = configuredReleaseKeyAlias
+            keyPassword = configuredReleaseKeyPassword
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
 
     buildTypes {
         debug {
             def manifestId = project.findProperty("debug.manifest.id")
-            buildConfigField "String", "ManifestId", "\"$manifestId\"";
+            buildConfigField "String", "ManifestId", "\"$manifestId\""
+            // Debug builds skip minification for faster iteration
+            minifyEnabled false
+            shrinkResources false
         }
         release {
-            minifyEnabled false
-            proguardFiles.add(file('proguard-android.txt'))
-            def manifestId = project.findProperty("${releaseType}.manifest.id")
-            buildConfigField "String", "ManifestId", "\"$manifestId\"";
-            // leave the apk unsigned for a release build if config is missing
-            if (signingConfigs.release.storeFile) {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            def manifestId = project.findProperty("${project.ext.releaseType}.manifest.id")
+            buildConfigField "String", "ManifestId", "\"$manifestId\""
+            if (releaseSigningConfigured) {
                 signingConfig signingConfigs.release
+            } else if (!releaseSigningRequired) {
+                println 'Unsigned release explicitly allowed for local dry run (--project-prop allow.unsigned.release=true)'
             } else {
-                println 'No signing config, release will be unsigned'
+                println 'Release signing inputs are missing during configuration; signed release tasks will fail in verifyReleaseSigningConfig until release.key.* or BATPHONE_RELEASE_* values are provided.'
             }
         }
     }
 
-    lintOptions {
-        abortOnError false
+    // Split APKs by ABI to reduce individual APK size
+    bundle {
+        language.enableSplit = true
+        density.enableSplit = true
+        abi.enableSplit = true
     }
+
 
     sourceSets.main {
         java.srcDirs += 'src/main/jni/serval-dna/java-api/src'
     }
+    lint {
+        // Keep ad-hoc local workflows permissive, but enforce failures during ship gates.
+        baseline = file("lint-baseline.xml")
+        abortOnError = strictCiLint || strictReleaseGateRequested
+    }
 
-    task libsodiumBuild
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.returnDefaultValues = true
+        unitTests.all {
+            maxParallelForks = configuredTestMaxParallelForks
+            minHeapSize = configuredTestMinHeap
+            maxHeapSize = configuredTestMaxHeap
+            if (configuredTestForkEvery > 0L) {
+                forkEvery = configuredTestForkEvery
+            }
+            jvmArgs "-XX:MaxMetaspaceSize=${configuredTestMaxMetaspace}",
+                    "-XX:ActiveProcessorCount=${configuredTestActiveProcessorCount}"
+            if (configuredTestUseSerialGc) {
+                jvmArgs "-XX:+UseSerialGC"
+            }
+            if (configuredTestHeapBaseMinAddress) {
+                jvmArgs "-XX:HeapBaseMinAddress=${configuredTestHeapBaseMinAddress}"
+            }
+            doFirst {
+                def directoriesToCreate = [
+                        binaryResultsDirectory.get().asFile,
+                        reports.junitXml.outputLocation.get().asFile,
+                        reports.html.outputLocation.get().asFile
+                ].findAll { it != null }
 
-    [
-            "armv7-a": "armv7-a",
-            //"x86"    : "i686",
-    ].each { abi, target ->
-        task "libsodium${abi}" (type: Exec) {
-            // this should only run when the libsodium submodule changes
-            inputs.property("commit", libSodiumStatus);
-            outputs.file("src/main/jni/libsodium/libsodium-android-${target}/lib/libsodium.a")
-            workingDir 'src/main/jni/libsodium'
-            environment ANDROID_NDK_HOME: "$android.ndkDirectory"
-            environment NDK_PLATFORM: "android-16"
-            executable 'sh'
-            args = ['-c', "dist-build/android-${abi}.sh"]
+                directoriesToCreate.each { File dir ->
+                    if (!dir.exists() && !dir.mkdirs() && !dir.exists()) {
+                        throw new GradleException("Unable to create test output directory ${dir} for ${path}")
+                    }
+                }
+            }
+            testLogging {
+                events = [TestLogEvent.PASSED, TestLogEvent.FAILED, TestLogEvent.SKIPPED] as Set
+                exceptionFormat = TestExceptionFormat.FULL
+            }
         }
-        libsodiumBuild.dependsOn "libsodium${abi}"
     }
+}
 
-    task hostServald(type: Exec){
-        // assumes that autoconf && configure have been run manually
-        inputs.files(fileTree(dir: 'src/main/jni/serval-dna', includes: ['*.c', '*.h']))
-        outputs.file('src/main/jni/serval-dna/servald')
-        workingDir 'src/main/jni/serval-dna'
-        commandLine "make", '-j', Runtime.runtime.availableProcessors(), 'servald'
+def androidExtension = project.extensions.getByName("android")
+
+// libsodiumBuild is disabled - libsodium is built via NDK build system (Android.mk)
+task libsodiumBuild {
+    enabled = false
+    doFirst {
+        logger.lifecycle("libsodiumBuild is disabled. Libsodium is built via NDK build system in Android.mk")
     }
+}
+
+task hostServald(type: Exec){
+    // assumes that autoconf && configure have been run manually
+    inputs.files(fileTree(dir: 'src/main/jni/serval-dna', includes: ['*.c', '*.h']))
+    outputs.file('src/main/jni/serval-dna/servald')
+    workingDir 'src/main/jni/serval-dna'
+    commandLine "make", '-j', Runtime.runtime.availableProcessors(), 'servald'
 }
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    testImplementation 'junit:junit:4.12'
+    implementation 'androidx.multidex:multidex:2.0.1'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.13'
+    testImplementation 'androidx.test:core:1.6.1'
+
+    // Android X libraries (required for modern Android development)
+    implementation 'androidx.cardview:cardview:1.0.0'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+
+    // SATNET AFRICA - Bitcoin & Voucher Network
+    // Bitcoin wallet library (BIP32/39 HD wallet)
+    implementation 'org.bitcoinj:bitcoinj-core:0.16.3'
+
+    // QR code generation and scanning
+    implementation 'com.google.zxing:core:3.5.1'
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+
+    // Cryptography and hashing
+    implementation 'com.google.crypto.tink:tink-android:1.10.0'
+
+    // Lightning Network (LDK - Lightning Dev Kit)
+    // Note: Bindings for Android to be implemented
+    // implementation 'org.ldk:ldk-java:0.0.x'
+
+    // Local database for vouchers and reputation
+    // SQLite is built-in to Android
+
+    // HTTP client for blockchain queries
+    implementation 'com.squareup.okhttp3:okhttp:4.11.0'
+
+    // JSON parsing
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // Kotlin coroutines (optional but recommended)
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+
+    // Instrumented test dependencies (androidTest)
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:rules:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-intents:3.6.1'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
 }
 
-def pandocTask(String variantName, String filename, String title){
-    def process = tasks["process${variantName}Resources"]
-    def merge = tasks["merge${variantName}Assets"]
-    def src = file("../${filename}")
-    def dest = file("${merge.outputDir}/${filename}")
+def sha256ForFile = { File file ->
+    MessageDigest digest = MessageDigest.getInstance("SHA-256")
+    file.withInputStream { input ->
+        byte[] buffer = new byte[8192]
+        int read
+        while ((read = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    digest.digest().collect { String.format("%02x", it) }.join()
+}
 
-    process.dependsOn tasks.create(name: "pandoc${variantName}${filename}", type: Exec, dependsOn: merge){
-        inputs.file src
-        outputs.file dest
-        executable = 'pandoc'
-        args=[
-                '--from', 'markdown_github-hard_line_breaks+fancy_lists+startnum',
-                '--to', 'html',
-                '--standalone',
-                '--css', 'servalhelp.css',
-                '--variable', "pagetitle:Serval Help: ${title}",
-                '--variable', "header-includes:<meta name=\"description\" content=\"Serval App WebView Page\">",
-                '--output', dest.absolutePath,
-                src.absolutePath
-        ]
+def isPandocAvailable() {
+    try {
+        def process = "pandoc --version".execute()
+        process.waitForProcessOutput()
+        return process.exitValue() == 0
+    } catch (Exception e) {
+        return false
+    }
+}
+
+def resolveOutputDirectory = { String taskName, String propertyName ->
+    def task = tasks.findByName(taskName)
+    if (task == null || !task.hasProperty(propertyName)) {
+        throw new GradleException("Task '${taskName}' is unavailable or does not expose '${propertyName}'")
+    }
+    task."${propertyName}".get().asFile
+}
+
+def pandocTask(variantName, filename, title){
+    def processTaskName = "process${variantName}Resources"
+    def mergeTaskName = "merge${variantName}Assets"
+    def src = file("../${filename}")
+
+    if (isPandocAvailable()) {
+        def pandocTaskName = "pandoc${variantName}${filename}"
+        tasks.register(pandocTaskName, Exec) {
+            dependsOn mergeTaskName
+            inputs.file src
+            doNotTrackState("Output directory is dynamic")
+            executable = 'pandoc'
+            doFirst {
+                def outputDir = resolveOutputDirectory(mergeTaskName, "outputDir")
+                def dest = file("${outputDir}/${filename}")
+                args=[
+                        '--from', 'markdown_github-hard_line_breaks+fancy_lists+startnum',
+                        '--to', 'html',
+                        '--standalone',
+                        '--css', 'servalhelp.css',
+                        '--variable', "pagetitle:Serval Help: ${title}",
+                        '--variable', "header-includes:<meta name=\"description\" content=\"Serval App WebView Page\">",
+                        '--output', dest.absolutePath,
+                        src.absolutePath
+                ]
+            }
+        }
+        tasks.configureEach {
+            if (name == processTaskName) {
+                dependsOn pandocTaskName
+            }
+        }
+    } else {
+        println "Skipping pandoc task for ${filename} - pandoc not available"
     }
 }
 
 def keyring = project.findProperty("serval.keyring")
 def keyringFile = keyring ? file(keyring) : null
 if (keyringFile && !keyringFile.exists())
-    keyringFile = null;
-def entryPin = null;
+    keyringFile = null
 
-android.applicationVariants.all { variant ->
-    def variantName = variant.name.capitalize()
+def entryPin = null
 
-    tasks["externalNativeBuild${variantName}"].dependsOn libsodiumBuild
+def configureBuildTypeTasks = { String variantName ->
+    def variantDir = variantName.toLowerCase()
+    def mergeAssetsTaskName = "merge${variantName}Assets"
+    def processResourcesTaskName = "process${variantName}Resources"
+    def externalNativeBuildTaskName = "externalNativeBuild${variantName}"
+    def assetZipTaskName = "assetZip${variantName}"
+    def assetManifestTaskName = "assetManifest${variantName}"
+    def assembleTaskName = "assemble${variantName}"
+    def validateSigningTaskName = "validateSigning${variantName}"
+    def preBuildTaskName = "pre${variantName}Build"
+    def packageTaskName = "package${variantName}"
+    def confType = variantDir == "release" ? project.ext.releaseType : "debug"
+    def manifestId = project.findProperty("${confType}.manifest.id")
+    def secret = project.findProperty("${confType}.manifest.secret")
+    def author = project.findProperty("${confType}.manifest.author")
+    def bk = project.findProperty("${confType}.manifest.bk")
 
-    variant.outputs.each { output ->
-        def mergeAssets = tasks["merge${variantName}Assets"]
-        task "assetZip${variantName}"(type: Zip, dependsOn: ["externalNativeBuild${variantName}", mergeAssets]) {
-            destinationDir = file(mergeAssets.outputDir)
-            archiveName = "serval.zip"
-            from ('src/main/servalzip/')
-            from ("build/intermediates/ndkBuild/${variant.name}/obj/local/armeabi-v7a") {
+    tasks.register(assetZipTaskName, Zip) {
+        dependsOn mergeAssetsTaskName
+        dependsOn externalNativeBuildTaskName
+        doNotTrackState("Output directory is dynamic")
+        archiveFileName = "serval.zip"
+        from('src/main/servalzip/')
+        nativeAbis.each { abi ->
+            from("build/intermediates/ndkBuild/${variantDir}/obj/local/${abi}") {
                 include "*PIE"
-                exclude "**/objs-${variant.name}/**"
-                into "bin"
+                exclude "**/objs-${variantDir}/**"
+                into "bin/${abi}"
             }
         }
-        task "assetManifest${variantName}"(type: Exec, dependsOn: mergeAssets){
-            workingDir = 'src/main/servalzip'
-            executable = 'git'
-            args=['ls-files', '-s', '.']
-            doFirst{
-                standardOutput = new FileOutputStream(file("${mergeAssets.outputDir}/manifest"))
-            }
+        doFirst {
+            destinationDirectory = resolveOutputDirectory(mergeAssetsTaskName, "outputDir")
         }
-
-        pandocTask(variantName, "CURRENT-RELEASE.md", "Release Notes")
-        pandocTask(variantName, "CREDITS.md", "Credits")
-        pandocTask(variantName, "LICENSE-SOFTWARE.md", "Software License")
-        pandocTask(variantName, "CC-BY-4.0.md", "Documentation License")
-        pandocTask(variantName, "PRIVACY.md", "Privacy Policy")
-
-        output.processResources.dependsOn "assetZip${variantName}"
-        output.processResources.dependsOn "assetManifest${variantName}"
     }
 
-    // Prompt for key passwords, if the signing config came from this build file
-    // (Android studio gui has a way to trigger this from an external singing config)
-    if (project.tasks.findByName("install$variantName")){
-        // add a manifest to any built apk, based on user config
-        def confType = "debug"
-        if (variant.name == "release")
-            confType = android.releaseType
+    tasks.register(assetManifestTaskName, Exec) {
+        dependsOn mergeAssetsTaskName
+        doNotTrackState("Output directory is dynamic")
+        workingDir = 'src/main/servalzip'
+        executable = 'git'
+        args = ['ls-files', '-s', '.']
+        doFirst {
+            def outputDir = resolveOutputDirectory(mergeAssetsTaskName, "outputDir")
+            standardOutput = file("${outputDir}/manifest").newOutputStream()
+        }
+    }
 
-        def manifestId = project.findProperty("${confType}.manifest.id");
-        def secret = project.findProperty("${confType}.manifest.secret");
-        def author = project.findProperty("${confType}.manifest.author");
-        def bk = project.findProperty("${confType}.manifest.bk");
+    pandocTask(variantName, "CURRENT-RELEASE.md", "Release Notes")
+    pandocTask(variantName, "CREDITS.md", "Credits")
+    pandocTask(variantName, "LICENSE-SOFTWARE.md", "Software License")
+    pandocTask(variantName, "CC-BY-4.0.md", "Documentation License")
+    pandocTask(variantName, "PRIVACY.md", "Privacy Policy")
+    def manifestTaskRequested = requestedTaskNames.any {
+        it.contains("manifest${variantName}".toLowerCase())
+    }
 
-        def promptTask = "prompt${variantName}Pwd"
-        task "$promptTask"{
-            doLast{
-                if (variant.buildType.name != "debug" && variant.signingConfig){
-                    def signConfig = android.signingConfigs.findByName(variant.signingConfig.name);
-                    if (signConfig!=null && signConfig.storeFile != null && signConfig.storeFile.exists()){
-                        if (!signConfig.storePassword)
-                            signConfig.storePassword=readPassword("Enter password for jar signing keystore:")
-                        if (!signConfig.keyPassword)
-                            signConfig.keyPassword=readPassword("Enter password for jar signing key:")
-                    }
+    tasks.configureEach {
+        if (name == processResourcesTaskName) {
+            dependsOn assetZipTaskName
+            dependsOn assetManifestTaskName
+        }
+    }
+
+    def promptTaskName = "prompt${variantName}Pwd"
+    tasks.register(promptTaskName) {
+        doLast {
+            if (variantDir != "debug" && releaseSigningRequired) {
+                def signConfig = androidExtension.signingConfigs.findByName("release")
+                if (signConfig != null && signConfig.storeFile != null && signConfig.storeFile.exists()) {
+                    if (!signConfig.storePassword)
+                        signConfig.storePassword = readPassword("Enter password for jar signing keystore:")
+                    if (!signConfig.keyPassword)
+                        signConfig.keyPassword = readPassword("Enter password for jar signing key:")
                 }
-                if (keyringFile!=null && author!=null && entryPin == null)
-                    entryPin = readPassword("Enter serval keyring entry pin:")
+            }
+            if (manifestTaskRequested && keyringFile != null && author != null && entryPin == null)
+                entryPin = readPassword("Enter serval keyring entry pin:")
+        }
+    }
+
+    tasks.configureEach {
+        if (name == validateSigningTaskName) {
+            dependsOn promptTaskName
+        }
+        if (name == preBuildTaskName) {
+            mustRunAfter promptTaskName
+        }
+    }
+
+    if (manifestId && (secret || (author && keyring))) {
+        def manifestTaskName = "manifest${variantName}"
+        tasks.register(manifestTaskName, Exec) {
+            dependsOn hostServald
+            dependsOn packageTaskName
+            environment SERVALINSTANCE_PATH: file('build/serval/').absolutePath
+            if (keyringFile != null && author != null) {
+                environment SERVALD_KEYRING_READONLY: "true"
+                environment SERVALD_KEYRING_PATH: keyring
+            }
+            executable = hostServald.outputs.files.singleFile
+            doFirst {
+                def apkDir = file("${layout.buildDirectory.get().asFile}/outputs/apk/${variantDir}")
+                def apkFile = fileTree(apkDir) {
+                    include "*.apk"
+                }.files.sort { a, b -> a.name <=> b.name }.find { it.exists() }
+                if (apkFile == null) {
+                    throw new GradleException("No APK found under ${apkDir} for ${variantName}")
+                }
+                args = ['rhizome', 'add', 'file']
+                if (keyringFile != null && author != null && entryPin)
+                    args += "--entry-pin=$entryPin"
+                args += [
+                        '--zip-comment',
+                        author ?: "",
+                        apkFile,
+                        '',
+                        secret ?: "",
+                        "service=file"
+                ]
+                if (manifestId)
+                    args += "id=$manifestId"
+                if (bk)
+                    args += "BK=$bk"
+                args += "name=${project.ext.appName}-${project.ext.gitDescribe}.apk"
+                delete(file('build/serval/'))
             }
         }
-        tasks["validateSigning${variantName}"].dependsOn "$promptTask"
-        // run the prompt task first as it doesn't work well with other parallel tasks
-        preBuild.mustRunAfter "$promptTask"
 
-        // TODO supported method to seed this id?
-        if (manifestId && (secret || (author && keyring))){
-            variant.outputs.each { output ->
-                def taskName = "manifest$variantName"
-                task "$taskName"(type: Exec, dependsOn: hostServald){
-                    environment SERVALINSTANCE_PATH: file('build/serval/').absolutePath
-                    if (keyringFile!=null && author!=null){
-                        environment SERVALD_KEYRING_READONLY: "true"
-                        environment SERVALD_KEYRING_PATH: keyring
-                    }
-                    executable = hostServald.outputs.files[0]
-                    doFirst{
-                        args = ['rhizome', 'add', 'file']
-                        if (keyringFile!=null && author!=null && entryPin)
-                            args+="--entry-pin=$entryPin"
-                        args += [
-                                '--zip-comment',
-                                author?:"",
-                                output.outputFile,
-                                '',
-                                secret?:"",
-                                "service=file"
-                        ]
-                        if (manifestId)
-                            args+="id=$manifestId"
-                        if (bk)
-                            args+="BK=$bk"
-                        args+="name=${android.appName}-${variant.versionName}.apk"
-                    }
-                    doLast{
-                        delete(file('build/serval/'))
-                    }
-                }
-                tasks["$taskName"].dependsOn "package$variantName"
-
-                output.assemble.dependsOn "$taskName"
+        tasks.configureEach {
+            if (name == assembleTaskName) {
+                dependsOn manifestTaskName
             }
         }
     }
 }
 
+afterEvaluate {
+    configureBuildTypeTasks("Debug")
+    configureBuildTypeTasks("Release")
+}
+
+tasks.register("productionGate") {
+    group = "verification"
+    description = "Runs the signed-release production readiness gate for this app module."
+    dependsOn(
+            "lintDebug",
+            "testDebugUnitTest",
+            "verifyReleaseSigningConfig",
+            "writeReleaseChecksums"
+    )
+}
+
+tasks.register("ciCriticalGate") {
+    group = "verification"
+    description = "CI-only strict lint/security regression gate (baseline-backed)."
+    dependsOn("lintDebug")
+}
+
+tasks.register("verifyReleaseSigningConfig") {
+    group = "verification"
+    description = "Fails when required release signing inputs are missing."
+    doLast {
+        def missing = []
+        if (configuredReleaseStoreFile == null) {
+            missing << "release.key.store"
+        }
+        if (!configuredReleaseKeyAlias.trim()) {
+            missing << "release.key.alias"
+        }
+        if (!configuredReleaseStorePassword.trim()) {
+            missing << "release.key.store.password or BATPHONE_RELEASE_STORE_PASSWORD"
+        }
+        if (!configuredReleaseKeyPassword.trim()) {
+            missing << "release.key.password or BATPHONE_RELEASE_KEY_PASSWORD"
+        }
+        if (!missing.isEmpty()) {
+            throw new GradleException("Release signing is incomplete. Missing: ${missing.join(', ')}")
+        }
+    }
+}
+
+tasks.register("writeReleaseChecksums") {
+    group = "build"
+    description = "Writes SHA-256 checksums for assembled release APK artifacts."
+    dependsOn("assembleRelease")
+    doLast {
+        def apkDir = file("${layout.buildDirectory.get().asFile}/outputs/apk/release")
+        def apkFiles = fileTree(apkDir) {
+            include("*.apk")
+        }.files.sort { a, b -> a.name <=> b.name }
+        if (apkFiles.isEmpty()) {
+            throw new GradleException("No release APKs found under ${apkDir}")
+        }
+        def checksumDir = file("${layout.buildDirectory.get().asFile}/outputs/checksums/release")
+        checksumDir.mkdirs()
+        def checksumFile = new File(checksumDir, "SHA256SUMS.txt")
+        checksumFile.text = apkFiles.collect { file ->
+            "${sha256ForFile(file)} *${file.name}"
+        }.join(System.lineSeparator()) + System.lineSeparator()
+        logger.lifecycle("Release checksums written to ${checksumFile}")
+    }
+}
+
+tasks.register("releaseReadinessGate") {
+    group = "verification"
+    description = "Strict signed-release gate including signing validation and checksum evidence."
+    dependsOn(
+            "productionGate"
+    )
+}
+
+tasks.configureEach {
+    if (name == "testDebugUnitTest") {
+        mustRunAfter("lintDebug")
+    }
+    if (name == "verifyReleaseSigningConfig") {
+        mustRunAfter("testDebugUnitTest")
+    }
+    if (releaseSigningRequired && (name == "preReleaseBuild" || name == "assembleRelease" || name == "bundleRelease")) {
+        dependsOn("verifyReleaseSigningConfig")
+    }
+    if (name == "assembleRelease") {
+        mustRunAfter("verifyReleaseSigningConfig")
+    }
+}
