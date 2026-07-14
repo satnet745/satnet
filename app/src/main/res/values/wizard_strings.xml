@@ -82,8 +82,16 @@
 	</string-array>	 
 	
 		<string name="pleaseWaitPreparing">Please wait while we test if we can get your device to join a Mesh network.</string>  
-		<string name="welcomePreparing">Testing for Mesh support</string>  
-		
+		<string name="welcomePreparing">Testing for Mesh support</string>
+
+    <!-- Phone number validation messages -->
+    <string name="phone_number_required">Please enter a phone number</string>
+    <string name="phone_number_invalid_min_digits">Phone number must contain at least 5 digits</string>
+    <string name="phone_number_required_for_wallet">A phone number is required before setting up your wallet.\n\nPlease go to Settings and set up your identity first.</string>
+    <!-- Wallet gate dialog strings -->
+    <string name="satnet_wallet_phone_required_title">Phone Number Required</string>
+    <string name="satnet_wallet_phone_required_setup_button">Set Up Identity</string>
+
 </resources>
 	
 	

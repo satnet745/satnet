@@ -33,12 +33,15 @@ import android.widget.LinearLayout;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import org.servalproject.IdentityPhoneNumberSupport;
 import org.servalproject.R;
+import org.servalproject.ServalBatPhoneApplication;
 import org.servalproject.bitcoin.BitcoinWallet;
 import org.servalproject.bitcoin.security.WalletEncryption;
 import org.servalproject.satnet.SatnetRuntimeConfig;
 import org.servalproject.satnet.SatnetStartupGate;
 import org.servalproject.satnet.WalletSessionStore;
+import org.servalproject.wizard.SetPhoneNumber;
 
 import java.util.List;
 import java.util.Arrays;
@@ -257,6 +260,23 @@ public class BitcoinWalletSetupActivity extends AppCompatActivity {
             SatnetStartupGate.Status status = refreshRuntimeStatus();
             if (!status.canEnterInteractiveFlows()) {
                 Toast.makeText(this, status.getBlockingMessage(), Toast.LENGTH_LONG).show();
+                return;
+            }
+
+            // A phone number (DID) must be configured before a wallet can be created or unlocked.
+            // Without an identity DID the wallet cannot be linked to a SATNET identity.
+            ServalBatPhoneApplication app =
+                    (ServalBatPhoneApplication) getApplicationContext();
+            if (!IdentityPhoneNumberSupport.isPhoneNumberConfigured(this, app)) {
+                new androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle(R.string.satnet_wallet_phone_required_title)
+                        .setMessage(R.string.phone_number_required_for_wallet)
+                        .setPositiveButton(R.string.satnet_wallet_phone_required_setup_button,
+                                (dialog, which) -> {
+                                    startActivity(new Intent(this, SetPhoneNumber.class));
+                                })
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show();
                 return;
             }
 

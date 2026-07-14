@@ -34,6 +34,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
 
+import org.servalproject.IdentityPhoneNumberSupport;
 import org.servalproject.Main;
 import org.servalproject.R;
 import org.servalproject.ServalBatPhoneApplication;
@@ -106,6 +107,15 @@ public class SetPhoneNumber extends Activity {
 		button.setOnClickListener(new OnClickListener() {
 			@Override
 			public void onClick(View view) {
+				final String configuredDid;
+				try {
+					configuredDid = IdentityPhoneNumberSupport.prepareDidForSubmission(SetPhoneNumber.this,
+							number.getText() == null ? null : number.getText().toString());
+				} catch (IllegalArgumentException e) {
+					app.displayToastMessage(e.getMessage());
+					return;
+				}
+				final String configuredName = name.getText() == null ? "" : name.getText().toString().trim();
 				button.setEnabled(false);
 
 				new AsyncTask<String, Void, Boolean>() {
@@ -115,6 +125,8 @@ public class SetPhoneNumber extends Activity {
 						try {
 
 							identity = app.server.setIdentityDetails(identity, params[0], params[1]);
+							IdentityPhoneNumberSupport.persistConfiguredDid(SetPhoneNumber.this,
+									identity != null ? identity.did : params[0]);
 
 							// Create the SATNET Android account if possible, but do not block setup.
 							try {
@@ -165,8 +177,7 @@ public class SetPhoneNumber extends Activity {
 						}
 						button.setEnabled(true);
 					}
-				}.execute(number.getText().toString(),
-						name.getText().toString());
+				}.execute(configuredDid, configuredName);
 			}
 		});
 	}
