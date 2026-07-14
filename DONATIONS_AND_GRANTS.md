@@ -182,7 +182,7 @@ Configure at build time:
 
 Example:
 
-`./gradlew assembleRelease -Psatnet.donations.btc.address=bc1qyouraddresshere -Psatnet.donations.btc.uri=bitcoin:bc1qyouraddresshere -Psatnet.support.url=https://satnet.app/support`
+`./gradlew assembleRelease -Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t -Psatnet.donations.btc.uri=bitcoin:bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t -Psatnet.support.url=https://satnet.app/support`
 
 ## Bottom line
 

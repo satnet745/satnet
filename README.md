@@ -93,15 +93,15 @@ Files you share may be copied to other participating devices.
 Support the Project (Bitcoin)
 -----------------------------
 
-SATNET support is Bitcoin-first. The in-app **Help -> About SATNET and how to support it in Bitcoin** page can now show a configured on-chain donation address.
+SATNET support is Bitcoin-first. The in-app **Help -> About SATNET and how to support it in Bitcoin** page can now show the configured on-chain donation address `bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t`.
 
 Set donation details at build time:
 
-    ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1qyouraddresshere
+    ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t
 
 Optional explicit URI:
 
-    ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1qyouraddresshere -Psatnet.donations.btc.uri=bitcoin:bc1qyouraddresshere
+    ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t -Psatnet.donations.btc.uri=bitcoin:bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t
 
 The support page URL is also configurable with `-Psatnet.support.url=...`.
 
