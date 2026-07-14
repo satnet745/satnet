@@ -109,6 +109,9 @@ def satnetRelayDirectoryUrl = (project.findProperty("satnet.relay.directory.url"
 def satnetExchangeRateProviderUrls = (project.findProperty("satnet.exchange.providers") ?: "https://api.coinbase.com/v2/exchange-rates?currency=BTC;https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies={CURRENCIES}").toString()
 def satnetExchangeRateBaseUrl = satnetExchangeRateProviderUrls.split(";")[0].trim()
 def satnetComplianceProfile = (project.findProperty("satnet.compliance.profile") ?: "partner-led").toString()
+def satnetSupportUrl = (project.findProperty("satnet.support.url") ?: "https://satnet.app/support").toString()
+def satnetDonationBitcoinAddress = (project.findProperty("satnet.donations.btc.address") ?: "").toString()
+def satnetDonationBitcoinUri = (project.findProperty("satnet.donations.btc.uri") ?: "").toString()
 def satnetRemoteKillSwitchEnabled = (project.findProperty("satnet.remote.kill_switch.enabled") ?: "true").toBoolean()
 def satnetAutoRhizomeApkImportEnabled = (project.findProperty("satnet.auto.rhizome.apk.import.enabled") ?: "false").toBoolean()
 def satnetAllowCustodialMode = (project.findProperty("satnet.allow.custodial.mode") ?: "false").toBoolean()
@@ -176,6 +179,9 @@ def readBooleanProperty = { String propertyName, boolean fallback ->
     def raw = (project.findProperty(propertyName) ?: "").toString().trim()
     return raw ? raw.toBoolean() : fallback
 }
+def toBuildConfigString = { String value ->
+    "\"${(value ?: "").replace("\\", "\\\\").replace("\"", "\\\"")}\""
+}
 def isWindowsHost = System.getProperty("os.name", "").toLowerCase().contains("windows")
 def configuredTestMaxParallelForks = readPositiveIntProperty("test.maxParallelForks", 1)
 def configuredTestMinHeap = (project.findProperty("test.minHeap") ?: "256m").toString()
@@ -240,6 +246,9 @@ android {
         buildConfigField "String", "SATNET_EXCHANGE_RATE_BASE_URL", "\"$satnetExchangeRateBaseUrl\""
         buildConfigField "String", "SATNET_EXCHANGE_RATE_PROVIDER_URLS", "\"$satnetExchangeRateProviderUrls\""
         buildConfigField "String", "SATNET_COMPLIANCE_PROFILE", "\"$satnetComplianceProfile\""
+        buildConfigField "String", "SATNET_SUPPORT_URL", toBuildConfigString(satnetSupportUrl)
+        buildConfigField "String", "SATNET_DONATION_BITCOIN_ADDRESS", toBuildConfigString(satnetDonationBitcoinAddress)
+        buildConfigField "String", "SATNET_DONATION_BITCOIN_URI", toBuildConfigString(satnetDonationBitcoinUri)
         buildConfigField "boolean", "SATNET_REMOTE_KILL_SWITCH_ENABLED", satnetRemoteKillSwitchEnabled.toString()
         buildConfigField "boolean", "SATNET_AUTO_RHIZOME_APK_IMPORT_ENABLED", satnetAutoRhizomeApkImportEnabled.toString()
         buildConfigField "boolean", "SATNET_ALLOW_CUSTODIAL_MODE", satnetAllowCustodialMode.toString()

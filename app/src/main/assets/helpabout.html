@@ -1,20 +1,44 @@
 <!doctype html>
 <html lang="en">
 	<head>
-		<title>Serval Help: About Serval</title>
+		<title>SATNET Help: About SATNET</title>
 		<meta charset="UTF-8">
-		<meta name="description" content="Serval App WebView Page">
+		<meta name="description" content="SATNET App Help Page">
 		<link rel="stylesheet" type="text/css" href="servalhelp.css">
-		<meta name="author" content="Romana Challans <romana@servalproject.com>">
+		<meta name="author" content="SATNET contributors">
 	</head>
 	<body>
-		<div>The Serval Project is a humanitarian effort to make mobile phones useful without cellular networks so that people have the best chance of communicating, without cost, wherever they are, and even when disaster strikes. Our work depends on donations and philanthropic support.</div> 
-		<div>For more information, visit <a href="http://servalproject.org">our website</a></div>
-		<div>You can contact us via email: <a href="mailto:enquiry@servalproject.org">enquiry@servalproject.org</a></div>
-		<br> 
-	    <div>If you like this application, then please consider a donation.</div>		
-		<div><a href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=92YQN3YXF7CRC" class="button">Donate</a></div>
-		<div>Thank you for helping us continue our work!</div>
+		<h2>About SATNET</h2>
+		<div>SATNET is a local-first Android app for resilient communication and Bitcoin-enabled field tools. The current app combines mesh calling, messaging, contacts, file sharing, SATNET Maps, and role-based Bitcoin tools such as wallet access, voucher issuance/redemption, and verifier workflows where enabled in the build.</div>
+		<div>For more information, visit <a href="https://satnet.app">satnet.app</a>.</div>
+		<div>Source code, release evidence, and documentation are maintained in the public repository.</div>
+		<br>
+		<h2>Support SATNET in Bitcoin</h2>
+	    <div>SATNET support is now described in Bitcoin terms. Donations, sustainers, sponsorships, and mission-aligned grants should be arranged in Bitcoin or Bitcoin-denominated terms so support stays aligned with the project&apos;s self-custodial financial model.</div>
+		<div>If this build includes a configured donation address, it appears below for direct on-chain support.</div>
+		<div id="btcAddressContainer" style="display:none;">
+			On-chain Bitcoin donation address:
+			<br>
+			<a id="btcAddressLink" href="#"></a>
+		</div>
+		<div><a id="supportLink" href="https://satnet.app/support" class="button">Support SATNET in Bitcoin</a></div>
+		<div>Thank you for helping fund security review, device testing, documentation, localization, and safe staged rollout work.</div>
+		<script>
+		if (appinfo) {
+			var supportUrl = appinfo.getSupportUrl ? appinfo.getSupportUrl() : "";
+			var btcAddress = appinfo.getDonationBitcoinAddress ? appinfo.getDonationBitcoinAddress() : "";
+			var btcUri = appinfo.getDonationBitcoinUri ? appinfo.getDonationBitcoinUri() : "";
+			if (supportUrl && supportUrl.trim().length > 0) {
+				document.getElementById("supportLink").setAttribute("href", supportUrl);
+			}
+			if (btcAddress && btcAddress.trim().length > 0) {
+				var targetUri = (btcUri && btcUri.trim().length > 0) ? btcUri : ("bitcoin:" + btcAddress);
+				var link = document.getElementById("btcAddressLink");
+				link.textContent = btcAddress;
+				link.setAttribute("href", targetUri);
+				document.getElementById("btcAddressContainer").style.display = "block";
+			}
+		}
+		</script>
 	</body>
 </html>
-
