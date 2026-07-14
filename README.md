@@ -99,9 +99,17 @@ Set donation details at build time:
 
     ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t
 
+Windows PowerShell:
+
+    .\gradlew.bat assembleDebug "-Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t"
+
 Optional explicit URI:
 
     ./gradlew assembleDebug -Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t -Psatnet.donations.btc.uri=bitcoin:bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t
+
+Windows PowerShell:
+
+    .\gradlew.bat assembleDebug "-Psatnet.donations.btc.address=bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t" "-Psatnet.donations.btc.uri=bitcoin:bc1q7jjcz3gvssv7jrqc7c54xmvx2fthrlj8vper5t"
 
 The support page URL is also configurable with `-Psatnet.support.url=...`.
 
